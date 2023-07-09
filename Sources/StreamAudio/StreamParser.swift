@@ -7,34 +7,58 @@
 
 import Foundation
 import AudioToolbox
+import AVFAudio
 import OSLog
 
 fileprivate let logger = Logger(subsystem: "StreamAudio", category: "StreamParser")
 
+public struct StreamPackets {
+    public let data: Data
+    public let packetCount: Int
+    public let packetDescription: [AudioStreamPacketDescription]?
+}
+
 public class StreamParserContext {
-    private var input: [Data] = []
-    private(set) var output: [Data] = []
+    private var output: [StreamPackets] = []
     
     // AudioFileStream properties
-    var readyToProducePackets: Bool = false
-    var fileFormat: AudioFileTypeID? = nil
-    var dataFormat: AudioStreamBasicDescription? = nil
-    var formatList: [AudioFormatListItem]? = nil
-    var audioDataByteCount: UInt64? = nil
-    var audioDataPacketCount: UInt64? = nil
-    var maximumPacketSize: UInt32? = nil
-    var dataOffset: Int64? = nil
-    var channelLayout: AudioChannelLayout? = nil
-    var magicCookieData: Data? = nil
-    var bitRate: UInt32? = nil
-    var packetTableInfo: AudioFilePacketTableInfo? = nil
+    public var readyToProducePackets: Bool = false
+    public var fileFormat: AudioFileTypeID? = nil
+    public var dataFormat: AudioStreamBasicDescription? = nil
+    public var formatList: [AudioFormatListItem]? = nil
+    public var audioDataByteCount: UInt64? = nil
+    public var audioDataPacketCount: UInt64? = nil
+    public var maximumPacketSize: UInt32? = nil
+    public var dataOffset: Int64? = nil
+    public var channelLayout: AudioChannelLayout? = nil
+    public var magicCookieData: Data? = nil
+    public var bitRate: UInt32? = nil
+    public var packetTableInfo: AudioFilePacketTableInfo? = nil
 
     init() {
         
     }
     
-    func pushOutput(_ data: Data) {
+    public func audioFormat() -> AVAudioFormat? {
+        guard var dataFormat else {
+            return nil
+        }
+        let layout: AVAudioChannelLayout? = if var channelLayout {
+            AVAudioChannelLayout(layout: &channelLayout)
+        } else {
+            nil
+        }
+        return AVAudioFormat(streamDescription: &dataFormat, channelLayout: layout)
+    }
+    
+    func pushOutput(_ data: StreamPackets) {
         output.append(data)
+    }
+    
+    func consumeOutput() -> [StreamPackets] {
+        let d = output
+        output = []
+        return d
     }
 }
 
@@ -48,23 +72,13 @@ fileprivate func packetsProc(
 ) -> Void {
     let ptr = inClientData.assumingMemoryBound(to: StreamParserContext.self)
     let context = ptr.pointee
-    if let inPacketDescriptions {
-        for _ in 0..<inNumberPackets {
-            let description = inPacketDescriptions.pointee
-            let offset = inInputData.advanced(by: Int(description.mStartOffset))
-            let data = Data(bytes: offset, count: Int(description.mDataByteSize))
-            context.pushOutput(data)
-        }
+    let descs: [AudioStreamPacketDescription]? = if let inPacketDescriptions {
+        Array(UnsafeBufferPointer(start: inPacketDescriptions, count: Int(inNumberPackets)))
     } else {
-        let packetSizePrecision = Double(inNumberBytes) / Double(inNumberPackets);
-        let packetSize = Int(packetSizePrecision)
-        assert(Double(packetSize) == packetSizePrecision, "Not divide fully")
-        for i in 0..<inNumberPackets {
-            let offset = inInputData.advanced(by: packetSize * Int(i))
-            let data = Data(bytes: offset, count: packetSize)
-            context.pushOutput(data)
-        }
+        nil
     }
+    context.pushOutput(StreamPackets(data: Data(bytes: inInputData, count: Int(inNumberBytes)), packetCount: Int(inNumberPackets), packetDescription: descs))
+    
 }
 
 
@@ -277,11 +291,31 @@ public class StreamParser {
         streamOpened = true
     }
     
-    public func parseBytes(_ inDataByteSize: UInt32, _ inData: UnsafeRawPointer?) throws {
+    public func readyToProducePackets() -> Bool {
+        context.readyToProducePackets
+    }
+    
+    public func audioFormat() -> AVAudioFormat? {
+        context.audioFormat()
+    }
+    
+    public func parseBytes(_ data: Data) throws -> [StreamPackets] {
+        try data.withUnsafeBytes { (ptr: UnsafeRawBufferPointer) in
+            try parseBytes(UInt32(ptr.count), ptr.baseAddress)
+        }
+    }
+    
+    public func parseBytes(_ inDataByteSize: UInt32, _ inData: UnsafeRawPointer?) throws -> [StreamPackets] {
         let osstatus = AudioFileStreamParseBytes(try audioFileStreamId(), inDataByteSize, inData, [])
         guard osstatus == noErr else {
             logger.error("AudioFileStreamParseBytes error: \(osstatus)")
             throw StreamAudioError(errorDescription: "AudioFileStreamParseBytes error: \(osstatus)")
+        }
+        if context.readyToProducePackets {
+            logger.info("parser context: \(String(describing: self.context), privacy: .public)")
+            return context.consumeOutput()
+        } else {
+            return []
         }
     }
     
