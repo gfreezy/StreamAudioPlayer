@@ -12,14 +12,14 @@ import OSLog
 
 fileprivate let logger = Logger(subsystem: "StreamAudio", category: "StreamParser")
 
-public struct StreamPackets {
+
+public struct StreamPacket {
     public let data: Data
-    public let packetCount: Int
-    public let packetDescription: [AudioStreamPacketDescription]?
+    public let packetDescription: AudioStreamPacketDescription?
 }
 
 public class StreamParserContext {
-    private var output: [StreamPackets] = []
+    private var output: [StreamPacket] = []
     
     // AudioFileStream properties
     public var readyToProducePackets: Bool = false
@@ -34,6 +34,7 @@ public class StreamParserContext {
     public var magicCookieData: Data? = nil
     public var bitRate: UInt32? = nil
     public var packetTableInfo: AudioFilePacketTableInfo? = nil
+    public var packets = 0
 
     init() {
         
@@ -51,11 +52,11 @@ public class StreamParserContext {
         return AVAudioFormat(streamDescription: &dataFormat, channelLayout: layout)
     }
     
-    func pushOutput(_ data: StreamPackets) {
+    func pushOutput(_ data: StreamPacket) {
         output.append(data)
     }
     
-    func consumeOutput() -> [StreamPackets] {
+    func consumeOutput() -> [StreamPacket] {
         let d = output
         output = []
         return d
@@ -72,13 +73,28 @@ fileprivate func packetsProc(
 ) -> Void {
     let ptr = inClientData.assumingMemoryBound(to: StreamParserContext.self)
     let context = ptr.pointee
-    let descs: [AudioStreamPacketDescription]? = if let inPacketDescriptions {
-        Array(UnsafeBufferPointer(start: inPacketDescriptions, count: Int(inNumberPackets)))
+    context.packets += Int(inNumberPackets)
+    if let inPacketDescriptions {
+        for i in 0..<inNumberPackets {
+            let description = inPacketDescriptions[Int(i)]
+            let offset = inInputData.advanced(by: Int(description.mStartOffset))
+            let data = Data(bytes: offset, count: Int(description.mDataByteSize))
+            let newDescription = AudioStreamPacketDescription(mStartOffset: 0,
+                                                              mVariableFramesInPacket: description.mVariableFramesInPacket,
+                                                              mDataByteSize: description.mDataByteSize)
+//            logger.info("parser stream packet description, old: \(String(reflecting: description), privacy: .public), new: \(String(reflecting: newDescription), privacy: .public)")
+            context.pushOutput(StreamPacket(data: data, packetDescription: newDescription))
+        }
     } else {
-        nil
+        let packetSizePrecision = Double(inNumberBytes) / Double(inNumberPackets);
+        let packetSize = Int(packetSizePrecision)
+        assert(Double(packetSize) == packetSizePrecision, "Not divide fully")
+        for i in 0..<inNumberPackets {
+            let offset = inInputData.advanced(by: packetSize * Int(i))
+            let data = Data(bytes: offset, count: packetSize)
+            context.pushOutput(StreamPacket(data: data, packetDescription: nil))
+        }
     }
-    context.pushOutput(StreamPackets(data: Data(bytes: inInputData, count: Int(inNumberBytes)), packetCount: Int(inNumberPackets), packetDescription: descs))
-    
 }
 
 
@@ -221,7 +237,7 @@ fileprivate func propertyListenerProc(
         }
     case kAudioFileStreamProperty_BitRate:
         var bitRate: UInt32 = 0
-        var size: UInt32 = UInt32(MemoryLayout.size(ofValue: bitRate))
+        var size: UInt32 = UInt32(MemoryLayout<UInt32>.alignment)
         let status = AudioFileStreamGetProperty(inAudioFileStream, inPropertyID, &size, &bitRate)
         if status == noErr {
             context.bitRate = bitRate
@@ -230,8 +246,14 @@ fileprivate func propertyListenerProc(
         }
     case kAudioFileStreamProperty_PacketTableInfo:
         var packetTableInfo: AudioFilePacketTableInfo = AudioFilePacketTableInfo()
-        var size: UInt32 = UInt32(MemoryLayout.size(ofValue: packetTableInfo))
-        let status = AudioFileStreamGetProperty(inAudioFileStream, inPropertyID, &size, &packetTableInfo)
+        var size: UInt32 = 0
+        var writable: DarwinBoolean = false
+        var status = AudioFileStreamGetPropertyInfo(inAudioFileStream, inPropertyID, &size, &writable);
+        guard status == noErr else {
+            logger.error("AudioFileStreamGetPropertyInfo \(propertyIDString, privacy: .public) error: \(status)")
+            return
+        }
+        status = AudioFileStreamGetProperty(inAudioFileStream, inPropertyID, &size, &packetTableInfo)
         if status == noErr {
             context.packetTableInfo = packetTableInfo
         } else {
@@ -299,20 +321,24 @@ public class StreamParser {
         context.audioFormat()
     }
     
-    public func parseBytes(_ data: Data) throws -> [StreamPackets] {
+    public func parseBytes(_ data: Data) throws -> [StreamPacket] {
         try data.withUnsafeBytes { (ptr: UnsafeRawBufferPointer) in
             try parseBytes(UInt32(ptr.count), ptr.baseAddress)
         }
     }
     
-    public func parseBytes(_ inDataByteSize: UInt32, _ inData: UnsafeRawPointer?) throws -> [StreamPackets] {
-        let osstatus = AudioFileStreamParseBytes(try audioFileStreamId(), inDataByteSize, inData, [])
+    public func parseBytes(_ inDataByteSize: UInt32, _ inData: UnsafeRawPointer?) throws -> [StreamPacket] {
+        let flag: AudioFileStreamParseFlags = if context.readyToProducePackets {
+            []
+        } else {
+            [.discontinuity]
+        }
+        let osstatus = AudioFileStreamParseBytes(try audioFileStreamId(), inDataByteSize, inData, flag)
         guard osstatus == noErr else {
             logger.error("AudioFileStreamParseBytes error: \(osstatus)")
             throw StreamAudioError(errorDescription: "AudioFileStreamParseBytes error: \(osstatus)")
         }
         if context.readyToProducePackets {
-            logger.info("parser context: \(String(describing: self.context), privacy: .public)")
             return context.consumeOutput()
         } else {
             return []

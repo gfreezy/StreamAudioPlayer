@@ -33,6 +33,14 @@ public class StreamDecoder {
         }
         audioConverter = converter
     }
+    
+    public func decodeOne(packet: StreamPacket) throws -> AVAudioPCMBuffer? {
+        if let desc = packet.packetDescription {
+            try decode(data: packet.data, packetCount: 1, packetDescriptions: [desc])
+        } else {
+            try decode(data: packet.data, packetCount: 1, packetDescriptions: nil)
+        }
+    }
         
     public func decode(data: Data, packetCount: UInt32, packetDescriptions: [AudioStreamPacketDescription]?) throws -> AVAudioPCMBuffer? {
         if sourceFormat.commonFormat == .otherFormat {
@@ -40,6 +48,7 @@ public class StreamDecoder {
                 throw StreamAudioError(errorDescription: "packet descriptions must not be nil")
             }
             let maximumPacketSize = packetDescriptions.map { $0.mDataByteSize }.max()!
+            logger.info("maximumPacketSize: \(maximumPacketSize)")
             // 创建一个 AVAudioCompressedBuffer
             let audioBuffer = AVAudioCompressedBuffer(format: sourceFormat, packetCapacity: AVAudioPacketCount(packetCount), maximumPacketSize: Int(maximumPacketSize))
             audioBuffer.byteLength = UInt32(data.count)
@@ -47,9 +56,7 @@ public class StreamDecoder {
             data.withUnsafeBytes { ptr in
                 audioBuffer.data.copyMemory(from: ptr.baseAddress!, byteCount: ptr.count)
             }
-            audioBuffer.packetDescriptions?.pointee.mDataByteSize = UInt32(data.count)
-            audioBuffer.packetDescriptions?.initialize(from: packetDescriptions, count: packetDescriptions.count)
-            
+            audioBuffer.packetDescriptions?.update(from: packetDescriptions, count: packetDescriptions.count)
             return try decode(buffer: audioBuffer)
         } else {
             // 创建一个 AVAudioPCMBuffer
@@ -73,11 +80,12 @@ public class StreamDecoder {
         
         // 创建一个 PCM 缓冲区
         let pcmBuffer = AVAudioPCMBuffer(pcmFormat: pcmFormat, frameCapacity: AVAudioFrameCount(buffer.byteLength))!
+        pcmBuffer.frameLength = 0
 
         var processed = false
         // 进行转换
         let inputBlock: AVAudioConverterInputBlock = { inNumPackets, outStatus in
-            logger.info("AVAudioConverterInputBlock: \(inNumPackets)")
+//            logger.info("AVAudioConverterInputBlock: \(inNumPackets)")
             if !processed {
                 outStatus.pointee = AVAudioConverterInputStatus.haveData
                 assert(inNumPackets >= buffer.packetCount)
@@ -96,9 +104,12 @@ public class StreamDecoder {
         case (.error, let e?):
             logger.error("Conversion failed")
             throw e
-        case (.inputRanDry, _), (.haveData, _):
+        case (.inputRanDry, _):
+            return pcmBuffer
+        case (.haveData, _):
             return pcmBuffer
         case (.endOfStream , _):
+            logger.info("end of stream reached")
             return nil
         default:
             fatalError("AudioConverter report error status while no error is provided.")

@@ -69,4 +69,28 @@ public class StreamAudioBufferReader {
             return data
         }
     }
+
+    // return emtpy when reach eof.
+    // return nil Data when there is no data available, should retry again.
+    public func read(exact size: Int) throws -> Data? {
+        let offset = try fileHandle.offset()
+        let data = try fileHandle.read(upToCount: size)
+        switch (data, streamAudio.isFinished) {
+        case (nil, true):
+            return Data()
+        case (let data?, true) where data.isEmpty:
+            return Data()
+        case (nil, false):
+            return nil
+        case (let data?, false) where data.isEmpty:
+            return nil
+        case (let data?, true):
+            return data
+        case (let data?, false) where data.count == size:
+            return data
+        case (_?, false):
+            try fileHandle.seek(toOffset: offset)
+            return nil
+        }
+    }
 }
