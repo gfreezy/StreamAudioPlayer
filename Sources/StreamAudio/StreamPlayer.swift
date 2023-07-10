@@ -12,15 +12,37 @@ import OSLog
 fileprivate let logger = Logger(subsystem: "StreamAudio", category: "StreamPlayer")
 
 public protocol StreamPlayerDelegate: AnyObject {
-    func onFillData(_ buffer: AudioQueueBuffer, packetDescriptions: inout [AudioStreamPacketDescription]) -> Int
+    func onFillData(_ buffer: inout AudioQueueBuffer, packetDescriptions: inout [AudioStreamPacketDescription], pause: inout Bool) -> Int
     func onStart()
     func onStop()
     func onPause()
 }
 
+public enum RunningState: String {
+    case created
+    case stopped
+    case playing
+    case paused
+    case disposed
+}
+
 public class StreamPlayer {
     private var audioQueue: AudioQueueRef? = nil
-    private var isRunning = false
+    private var _runningState: RunningState = .created
+    private var runningStateLock: NSLock = NSLock()
+    private(set) var runningState: RunningState {
+        set(value) {
+            runningStateLock.withLock {
+                _runningState = value
+            }
+        }
+        
+        get {
+            runningStateLock.withLock {
+                _runningState
+            }
+        }
+    }
     private var asbd: AudioStreamBasicDescription
     public weak var delegate: StreamPlayerDelegate?
     
@@ -52,9 +74,15 @@ public class StreamPlayer {
         }
     }
 
+    public func notifyNewData() throws {
+        if runningState == .created || runningState == .paused {
+            try start()
+        }
+    }
+    
     public func start() throws {
-        guard !isRunning else {
-            logger.error("AudioQueue is running")
+        if runningState == .stopped || runningState == .disposed {
+            logger.error("AudioQueue is stopped or disposed")
             return
         }
         guard let queue = audioQueue else {
@@ -62,74 +90,93 @@ public class StreamPlayer {
             throw StreamAudioError(errorDescription: "audioQueue empty")
         }
 
+        runningState = .playing
+        
         let status = AudioQueueStart(queue, nil)
         guard status == noErr else {
             logger.error("AudioQueueStart error: \(status)")
             throw StreamAudioError(errorDescription: "AudioQueueStart error: \(status)")
         }
-        isRunning = true
+        
         delegate?.onStart()
     }
     
     public func pause() throws {
-        guard isRunning else {
+        guard runningState == .playing else {
             logger.error("AudioQueue is not running")
             return
         }
         guard let queue = audioQueue else {
             throw StreamAudioError(errorDescription: "audioQueue empty")
         }
+        runningState = .paused
         let status = AudioQueuePause(queue)
         guard status == noErr else {
             logger.error("AudioQueuePause error: \(status)")
             throw StreamAudioError(errorDescription: "AudioQueuePause error: \(status)")
         }
-        isRunning = false
         delegate?.onPause()
     }
     
     public func stop(_ immediate: Bool = true) throws {
-        guard isRunning else {
+        if runningState == .stopped || runningState == .disposed {
+            return
+        }
+        guard runningState == .playing || runningState == .paused else {
             logger.error("AudioQueue is not running")
             return
         }
         guard let queue = audioQueue else {
             throw StreamAudioError(errorDescription: "audioQueue empty")
         }
-        var status = AudioQueueStop(queue, immediate)
+        runningState = .stopped
+        let status = AudioQueueStop(queue, immediate)
         guard status == noErr else {
             logger.error("AudioQueueStop error: \(status)")
             throw StreamAudioError(errorDescription: "AudioQueueStop error: \(status)")
         }
-        isRunning = false
+        
         delegate?.onStop()
+        try dispose()
     }
     
-    public func dispose(_ immediate: Bool = true) throws {
+    func dispose(_ immediate: Bool = true) throws {
+        guard runningState != .disposed else {
+            logger.error("AudioQueue is disposed")
+            return
+        }
         guard let queue = audioQueue else {
             throw StreamAudioError(errorDescription: "audioQueue empty")
         }
+        runningState = .disposed
         let status = AudioQueueDispose(queue, immediate)
         guard status == noErr else {
             logger.error("AudioQueueDispose error: \(status)")
             throw StreamAudioError(errorDescription: "AudioQueueDispose error: \(status)")
         }
-        isRunning = false
         delegate?.onStop()
     }
     
     private let handleOutputBuffer: AudioQueueOutputCallback = { userData, queue, buffer in
         let player = Unmanaged<StreamPlayer>.fromOpaque(userData!).takeUnretainedValue()
-        guard player.isRunning else {
+        guard player.runningState == .playing || player.runningState == .created else {
             return
         }
         var packetDescriptions: [AudioStreamPacketDescription] = []
-        let bytes = player.delegate?.onFillData(buffer.pointee, packetDescriptions: &packetDescriptions) ?? 0
+        var pause = false
+        let bytes = player.delegate?.onFillData(&buffer.pointee, packetDescriptions: &packetDescriptions, pause: &pause) ?? 0
         if bytes == 0 {
             memset(buffer.pointee.mAudioData, 0, Int(buffer.pointee.mAudioDataBytesCapacity))
             buffer.pointee.mAudioDataByteSize = buffer.pointee.mAudioDataBytesCapacity
         }
-        let status = if packetDescriptions.isEmpty {
+        if player.runningState == .playing {
+            if bytes == 0 {
+                logger.info("enqueue empty buffer")
+            } else {
+                logger.info("enqueue buffer: \(buffer.pointee.mAudioDataByteSize)")
+            }
+        }
+        var status = if packetDescriptions.isEmpty {
             AudioQueueEnqueueBuffer(queue, buffer, 0, nil)
         } else {
             AudioQueueEnqueueBuffer(queue, buffer, UInt32(packetDescriptions.count), &packetDescriptions)
@@ -138,12 +185,21 @@ public class StreamPlayer {
             logger.error("AudioQueueEnqueueBuffer error: \(status)")
             return
         }
-        if bytes == 0 {
-            do {
-                try player.pause()
-            } catch {
-                logger.error("pause in AudioQueueOutputCallback error: \(error)")
+//        status = AudioQueuePrime(queue, 0, nil)
+//        guard status == noErr else {
+//            logger.error("AudioQueuePrime error: \(status)")
+//            return
+//        }
+        do {
+            if player.runningState == .playing && bytes == 0 {
+                if pause {
+                    try player.pause()
+                } else {
+                    try player.stop(false)
+                }
             }
+        } catch {
+            logger.error("pause in AudioQueueOutputCallback error: \(error)")
         }
     }
     
@@ -161,12 +217,17 @@ public class StreamPlayer {
             
             if isRunning == 0 {
                 do {
-                    try player.stop()
-                    try player.dispose()
+                    try player.stop(false)
                 } catch {
                     logger.error("stop in propertyListener error: \(error)")
                 }
             }
         }
+    }
+    
+    deinit {
+        do {
+            try dispose()
+        } catch {}
     }
 }

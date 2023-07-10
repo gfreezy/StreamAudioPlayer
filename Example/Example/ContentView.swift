@@ -30,8 +30,8 @@ struct ContentView: View {
             Button("Download") {
                 Task {
                     do {
+                        try self.downloader?.stop()
                         let downloader = Mp3Downloader(URL(string: "https://freetestdata.com/wp-content/uploads/2021/09/Free_Test_Data_100KB_MP3.mp3")!)
-                        try downloader.download()
                         try await downloader.play()
                         self.downloader = downloader
                     } catch {
@@ -47,18 +47,19 @@ struct ContentView: View {
 
 private let path = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first!.appendingPathComponent("a.mp3")
 
-class Mp3Downloader : NSObject, URLSessionDataDelegate {
+class Mp3Downloader : NSObject, URLSessionDataDelegate, StreamPlayerDelegate {
+
     private var task: URLSessionDataTask? = nil
     private var parser: StreamParser? = nil
-    private var decoder: StreamDecoder? = nil
     private let url: URL
     private let buffer: StreamAudioBuffer = StreamAudioBuffer(path: path)
     private var totalPackets = 0
     private var totalPcmBuffers = 0
     private var backgroundTask: Task<(), Never>?
+    private var streamPlayer: StreamPlayer? = nil
+    private var pendingPackets: [StreamPacket] = []
+    private var pendingLock: NSLock = NSLock()
     
-    private let audioEngine = AVAudioEngine()
-    private let playerNode = AVAudioPlayerNode()
     private let audioEngineSetuped = OneShotChannel()
     let file = try! AVAudioFile(forWriting: FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first!.appendingPathComponent("output.wav"),
                                 settings: [AVFormatIDKey: kAudioFormatLinearPCM, AVSampleRateKey: 44100, AVNumberOfChannelsKey: 2])
@@ -68,36 +69,69 @@ class Mp3Downloader : NSObject, URLSessionDataDelegate {
         logger.info("store path: \(path, privacy: .public)")
     }
     
-    private func receivedPcmBuffer(buffer: AVAudioPCMBuffer) async {
-        audioEngineSetuped.finish(())
-        totalPcmBuffers += 1
-        await playerNode.scheduleBuffer(buffer)
+    func onFillData(_ buffer: inout AudioQueueBuffer, packetDescriptions: inout [AudioStreamPacketDescription], pause: inout Bool) -> Int {
+        let packet: StreamPacket? = pendingLock.withLock {
+            guard !pendingPackets.isEmpty else {
+                return nil
+            }
+            let packet = pendingPackets.removeFirst()
+            assert(packet.data.count < buffer.mAudioDataBytesCapacity)
+            return packet
+        }
+        guard let packet else {
+            return 0
+        }
+        packet.data.withUnsafeBytes { ptr in
+            buffer.mAudioData.copyMemory(from: ptr.baseAddress!, byteCount: ptr.count)
+        }
+        buffer.mAudioDataByteSize = UInt32(packet.data.count)
         
-        try! file.write(from: buffer)
+        if let d = packet.packetDescription {
+            packetDescriptions.append(d)
+        }
+        
+        return packet.data.count
+        
     }
     
-    private func setupAudioEngine(format: AVAudioFormat) {
+    func onStart() {
         
-        // Attach the player node to the audio engine.
-        audioEngine.attach(playerNode)
-
-        // Connect the player node to the output node.
-        audioEngine.connect(playerNode,
-                            to: audioEngine.mainMixerNode,
-                            format: audioEngine.mainMixerNode.outputFormat(forBus: 0))
+    }
+    
+    func onStop() {
+        logger.info("stop")
+    }
+    
+    func onPause() {
+        logger.info("pause")
+    }
+    
+    private func receivedPacket(_ packet: StreamPacket) {
+        pendingLock.withLock {
+            pendingPackets.append(packet)
+        }
+        audioEngineSetuped.finish(())
+        totalPcmBuffers += 1
+        do {
+            try streamPlayer?.notifyNewData()
+        } catch {}
+    }
+    
+    private func setupAudioEngine(format: AVAudioFormat) throws {
+        streamPlayer = try StreamPlayer(asbd: format.streamDescription.pointee)
+        streamPlayer?.delegate = self
     }
     
     func play() async throws {
         try download()
         try await audioEngineSetuped.wait()
         
-        try audioEngine.start()
-        playerNode.play()
+        try streamPlayer?.start()
     }
     
-    func stop() {
-        playerNode.stop()
-        audioEngine.stop()
+    func stop() throws {
+        backgroundTask?.cancel()
+        try streamPlayer?.stop()
     }
     
     private func cancelBackgroundTask () {
@@ -168,30 +202,18 @@ class Mp3Downloader : NSObject, URLSessionDataDelegate {
             return
         }
         
-        if decoder == nil {
+        if streamPlayer == nil {
             guard let audioFormat = parser.audioFormat() else {
                 logger.error("No audio format got from parser. Return early.")
                 return
             }
-            decoder = StreamDecoder(sourceFormat: audioFormat)
-            guard let decoder else {
-                logger.error("Create StreamDecoder error.")
-                return
-            }
-            setupAudioEngine(format: decoder.pcmFormat)
+
+            try setupAudioEngine(format: audioFormat)
         }
-        
-        let decoder = self.decoder!
         
         for packet in packets {
             totalPackets += 1
-            let pcmBuffer = try decoder.decodeOne(packet: packet)
-            if let pcmBuffer {
-                await receivedPcmBuffer(buffer: pcmBuffer)
-//                logger.info("new pcmbuffer")
-            } else {
-                logger.info("reach end of stream")
-            }
+            receivedPacket(packet)
         }
 //        logger.info("finished parsedData")
     }
@@ -217,6 +239,11 @@ class Mp3Downloader : NSObject, URLSessionDataDelegate {
     
     deinit {
         cancelBackgroundTask()
+        do {
+            try stop()
+        } catch {
+            
+        }
     }
 }
 
