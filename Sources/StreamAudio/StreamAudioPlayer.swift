@@ -85,7 +85,7 @@ public class StreamAudioPlayer : NSObject {
     }
     
     public func stop() throws {
-        backgroundTask?.cancel()
+        cancelBackgroundTask()
         try streamPlayer?.stop()
     }
     
@@ -115,7 +115,6 @@ public class StreamAudioPlayer : NSObject {
             } catch {
                 logger.error("process background error: \(error)")
             }
-            backgroundTask = nil
         }
     }
     

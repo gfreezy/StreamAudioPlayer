@@ -11,6 +11,9 @@ import OSLog
 
 fileprivate let logger = Logger(subsystem: "StreamAudio", category: "Mp3Downloader")
 
+
+private let path = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first!.appendingPathComponent("a.mp3")
+
 struct ContentView: View {
     @State var downloader: StreamAudioPlayer? = nil
     
@@ -24,7 +27,7 @@ struct ContentView: View {
                 .imageScale(.large)
                 .foregroundStyle(.tint)
             Text("Hello, world!")
-            Button("Download") {
+            Button("Play") {
                 Task {
                     do {
                         try self.downloader?.stop()
@@ -37,13 +40,16 @@ struct ContentView: View {
                     }
                 }
             }
+            
+            Button("Stop") {
+                do {
+                    try self.downloader?.stop()
+                } catch {}
+            }
         }
         .padding()
     }
 }
-
-
-private let path = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first!.appendingPathComponent("a.mp3")
 
 @available(iOS 16.0, macOS 13.0, *)
 #Preview {
