@@ -12,11 +12,18 @@ let package = Package(
             name: "StreamAudio",
             targets: ["StreamAudio"]),
     ],
+    dependencies: [
+        .package(name: "Semaphore", url: "https://github.com/groue/Semaphore", revision: "b92ec84")
+    ],
     targets: [
         // Targets are the basic building blocks of a package, defining a module or a test suite.
         // Targets can depend on other targets in this package and products from dependencies.
         .target(
-            name: "StreamAudio"),
+            name: "StreamAudio",
+            dependencies: [
+                "Semaphore"
+            ]
+        ),
         .testTarget(
             name: "StreamAudioTests",
             dependencies: ["StreamAudio"]),

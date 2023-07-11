@@ -11,11 +11,23 @@ import OSLog
 
 fileprivate let logger = Logger(subsystem: "StreamAudio", category: "StreamPlayer")
 
+public enum FillDataStatus {
+    case hasMoreData
+    case noEnoughData
+    case eof
+}
+
 public protocol StreamPlayerDelegate: AnyObject {
-    func onFillData(_ buffer: inout AudioQueueBuffer, packetDescriptions: inout [AudioStreamPacketDescription], pause: inout Bool) -> Int
+    func onFillData(_ buffer: inout AudioQueueBuffer, packetDescriptions: inout [AudioStreamPacketDescription]) -> FillDataStatus
     func onStart()
     func onStop()
     func onPause()
+}
+
+public extension StreamPlayerDelegate {
+    func onStart() {}
+    func onStop() {}
+    func onPause() {}
 }
 
 public enum RunningState: String {
@@ -45,6 +57,8 @@ public class StreamPlayer {
     }
     private var asbd: AudioStreamBasicDescription
     public weak var delegate: StreamPlayerDelegate?
+    private var pendingBuffersLock = NSLock()
+    private var pendingBuffers: [AudioQueueBufferRef] = []
     
     public init(asbd: AudioStreamBasicDescription) throws {
         self.asbd = asbd
@@ -53,18 +67,18 @@ public class StreamPlayer {
             logger.error("AudioQueueNewOutput error: \(status)")
             throw StreamAudioError(errorDescription: "AudioQueueNewOutput error: \(status)")
         }
-        
+
         // allocate buffers
         let buffersCount = 5
         let bufferSize = 4096
         for _ in 0..<buffersCount {
             var buffer: AudioQueueBufferRef?
-            status = AudioQueueAllocateBuffer(audioQueue, UInt32(bufferSize), &buffer)
+            let status = AudioQueueAllocateBuffer(audioQueue, UInt32(bufferSize), &buffer)
             guard status == noErr, let buffer else {
                 logger.error("AudioQueueAllocateBuffer error: \(status)")
                 throw StreamAudioError(errorDescription: "AudioQueueAllocateBuffer error: \(status)")
             }
-            handleOutputBuffer(Unmanaged.passUnretained(self).toOpaque(), audioQueue, buffer)
+            pushPendingAudioQueueBuffer(buffer)
         }
         
         status = AudioQueueAddPropertyListener(audioQueue, kAudioQueueProperty_IsRunning, propertyListener, Unmanaged.passUnretained(self).toOpaque())
@@ -73,23 +87,59 @@ public class StreamPlayer {
             throw StreamAudioError(errorDescription: "AudioQueueAddPropertyListener for `IsRunning` error: \(status)")
         }
     }
-
-    public func notifyNewData() throws {
-        if runningState == .created || runningState == .paused {
-            try start()
+    
+    private func pushPendingAudioQueueBuffer(_ buffer: AudioQueueBufferRef) {
+        pendingBuffersLock.withLock {
+            pendingBuffers.append(buffer)
         }
     }
     
-    public func start() throws {
-        if runningState == .stopped || runningState == .disposed {
-            logger.error("AudioQueue is stopped or disposed")
+    private func popPendingAudioQueueBuffer() -> AudioQueueBufferRef? {
+        pendingBuffersLock.withLock {
+            pendingBuffers.popLast()
+        }
+    }
+    
+    private func countPendingAudioQueueBuffer() -> Int {
+        pendingBuffersLock.withLock {
+            pendingBuffers.count
+        }
+    }
+    
+    private func enqueuePendingBuffers() throws {
+        guard let audioQueue else {
             return
         }
+        while let buffer = popPendingAudioQueueBuffer() {
+            if !Self.handleOutputBufferCallback(Unmanaged.passUnretained(self).toOpaque(), audioQueue, buffer) {
+                break
+            }
+        }
+    }
+
+    public func notifyNewData() throws {
+        if runningState == .paused {
+            try play()
+        }
+    }
+    
+    public func play() throws {
         guard let queue = audioQueue else {
             logger.error("audioQueue empty")
             throw StreamAudioError(errorDescription: "audioQueue empty")
         }
 
+        switch runningState {
+        case .created, .paused:
+            try enqueuePendingBuffers()
+        case .playing:
+            throw StreamAudioError(errorDescription: "AudioQueue is playing")
+        case .stopped, .disposed:
+            logger.error("AudioQueue is stopped or disposed")
+            throw StreamAudioError(errorDescription: "AudioQueue is stopped or disposed")
+        }
+        
+        logger.info("start audio queue")
         runningState = .playing
         
         let status = AudioQueueStart(queue, nil)
@@ -102,6 +152,7 @@ public class StreamPlayer {
     }
     
     public func pause() throws {
+        logger.info("pause")
         guard runningState == .playing else {
             logger.error("AudioQueue is not running")
             return
@@ -157,50 +208,38 @@ public class StreamPlayer {
         delegate?.onStop()
     }
     
-    private let handleOutputBuffer: AudioQueueOutputCallback = { userData, queue, buffer in
+    private static func handleOutputBufferCallback(_ userData: UnsafeMutableRawPointer?, _ queue: AudioQueueRef, _ buffer: AudioQueueBufferRef) -> Bool {
         let player = Unmanaged<StreamPlayer>.fromOpaque(userData!).takeUnretainedValue()
-        guard player.runningState == .playing || player.runningState == .created else {
-            return
+        guard player.runningState == .playing || player.runningState == .created, let delegate = player.delegate else {
+            logger.error("runningState is \(player.runningState.rawValue, privacy: .public), delegate is \(player.delegate != nil, privacy: .public), exit handleOutputBuffer")
+            return false
         }
         var packetDescriptions: [AudioStreamPacketDescription] = []
-        var pause = false
-        let bytes = player.delegate?.onFillData(&buffer.pointee, packetDescriptions: &packetDescriptions, pause: &pause) ?? 0
-        if bytes == 0 {
-            memset(buffer.pointee.mAudioData, 0, Int(buffer.pointee.mAudioDataBytesCapacity))
-            buffer.pointee.mAudioDataByteSize = buffer.pointee.mAudioDataBytesCapacity
-        }
-        if player.runningState == .playing {
-            if bytes == 0 {
-                logger.info("enqueue empty buffer")
+        let fillStatus = delegate.onFillData(&buffer.pointee, packetDescriptions: &packetDescriptions)
+        switch fillStatus {
+        case .noEnoughData:
+            try? player.pause()
+            return false
+        case .eof:
+            try? player.stop(false)
+            return false
+        case .hasMoreData:
+            let status = if packetDescriptions.isEmpty {
+                AudioQueueEnqueueBuffer(queue, buffer, 0, nil)
             } else {
-                logger.info("enqueue buffer: \(buffer.pointee.mAudioDataByteSize)")
+                AudioQueueEnqueueBuffer(queue, buffer, UInt32(packetDescriptions.count), &packetDescriptions)
             }
-        }
-        var status = if packetDescriptions.isEmpty {
-            AudioQueueEnqueueBuffer(queue, buffer, 0, nil)
-        } else {
-            AudioQueueEnqueueBuffer(queue, buffer, UInt32(packetDescriptions.count), &packetDescriptions)
-        }
-        guard status == noErr else {
-            logger.error("AudioQueueEnqueueBuffer error: \(status)")
-            return
-        }
-//        status = AudioQueuePrime(queue, 0, nil)
-//        guard status == noErr else {
-//            logger.error("AudioQueuePrime error: \(status)")
-//            return
-//        }
-        do {
-            if player.runningState == .playing && bytes == 0 {
-                if pause {
-                    try player.pause()
-                } else {
-                    try player.stop(false)
-                }
+            guard status == noErr else {
+                logger.error("AudioQueueEnqueueBuffer error: \(status)")
+                return true
             }
-        } catch {
-            logger.error("pause in AudioQueueOutputCallback error: \(error)")
+            return true
         }
+    }
+    
+    private let handleOutputBuffer: AudioQueueOutputCallback = { userData, queue, buffer in
+        _ = handleOutputBufferCallback(userData, queue, buffer)
+        return
     }
     
     private let propertyListener: AudioQueuePropertyListenerProc = { userData, queue, propertyId in

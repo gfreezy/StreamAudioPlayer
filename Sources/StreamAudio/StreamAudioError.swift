@@ -7,9 +7,9 @@
 
 import Foundation
 
-struct StreamAudioError: LocalizedError {
-    var errorDescription: String?
-    var failureReason: String?
-    var helpAnchor: String?
-    var recoverySuggestion: String?
+public struct StreamAudioError: LocalizedError {
+    public var errorDescription: String?
+    public var failureReason: String?
+    public var helpAnchor: String?
+    public var recoverySuggestion: String?
 }
