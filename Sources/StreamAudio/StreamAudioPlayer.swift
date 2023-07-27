@@ -11,12 +11,56 @@ import AudioToolbox
 import AVFAudio
 import Semaphore
 
-fileprivate let logger = Logger(subsystem: "StreamAudioPlayer", category: "Mp3Downloader")
+fileprivate let logger = Logger(subsystem: "StreamAudio", category: "StreamAudioPlayer")
 
-public class StreamAudioPlayer : NSObject {
+public class URLAudioPlayer: NSObject, URLSessionTaskDelegate, URLSessionDataDelegate {
     private var urlSessionTask: URLSessionDataTask? = nil
-    private var parser: StreamParser? = nil
     private let url: URL
+    private let player: StreamAudioPlayer
+    
+    public init(_ url: URL, cachePath: URL, fileType: AudioFileTypeID = 0) {
+        self.url = url
+        player = StreamAudioPlayer(cachePath: cachePath)
+    }
+    
+    public func play() async throws {
+        guard urlSessionTask == nil else {
+            return
+        }
+        urlSessionTask = URLSession.shared.dataTask(with: url)
+        urlSessionTask?.delegate = self
+        urlSessionTask?.resume()
+        try await player.play()
+    }
+    
+    public func stop() throws {
+        try player.stop()
+    }
+    
+    public func urlSession(_ session: URLSession, task: URLSessionTask, didCompleteWithError error: Error?) {
+        logger.info("finished recved all data.")
+        try! player.finishData()
+        
+        if let error {
+            logger.error("complele error: \(error)")
+            return
+        }
+    }
+    
+    public func urlSession(_ session: URLSession, dataTask: URLSessionDataTask, didReceive data: Data) {
+        logger.info("recved data: \(data.count)")
+        do {
+            try player.writeData(data)
+        } catch {
+            logger.error("write data error: \(error)")
+        }
+    }
+}
+
+
+/// Initialized a new `StreamAudioPlayer` every time.
+public class StreamAudioPlayer : NSObject {
+    private var parser: StreamParser? = nil
     private let buffer: StreamAudioBuffer
     private let fileType: AudioFileTypeID
     private var totalPackets = 0
@@ -29,10 +73,8 @@ public class StreamAudioPlayer : NSObject {
     private let pendingPacketsLimit: Int
     private var finishedAllPacketsParsing = false
     private let audioEngineSetuped = OneShotChannel()
-    
 
-    public init(_ url: URL, cachePath: URL, fileType: AudioFileTypeID = 0, pendingPacketsLimit: Int = 50) {
-        self.url = url
+    public init(cachePath: URL, fileType: AudioFileTypeID = 0, pendingPacketsLimit: Int = 50) {
         self.pendingPacketsLimit = pendingPacketsLimit
         self.buffer = StreamAudioBuffer(path: cachePath)
         self.fileType = fileType
@@ -78,7 +120,7 @@ public class StreamAudioPlayer : NSObject {
     }
     
     public func play() async throws {
-        try download()
+        try starBackgroundParsingAndDecoding()
         try await audioEngineSetuped.wait()
         
         try streamPlayer?.play()
@@ -96,16 +138,8 @@ public class StreamAudioPlayer : NSObject {
         }
     }
 
-    public func download() throws {
-        guard urlSessionTask == nil else {
-            return
-        }
-        
+    public func starBackgroundParsingAndDecoding() throws {
         parser = try StreamParser.create(fileType: fileType)
-        urlSessionTask = URLSession.shared.dataTask(with: url)
-        urlSessionTask?.delegate = self
-        urlSessionTask?.resume()
-        
         backgroundTask = Task.detached { [weak self] in
             guard let self else {
                 return
@@ -116,6 +150,22 @@ public class StreamAudioPlayer : NSObject {
                 logger.error("process background error: \(error)")
             }
         }
+    }
+    
+    public func writeData(_ data: Data) throws {
+        do {
+            try buffer.write(contentsOf: data)
+        } catch {
+            logger.error("write data error: \(error)")
+        }
+    }
+    
+    public func finishData() throws {
+        try buffer.close()
+    }
+    
+    public func newReader() -> StreamAudioBufferReader {
+        buffer.newReader()
     }
     
     private func processDataInBackground() async throws {
@@ -147,17 +197,18 @@ public class StreamAudioPlayer : NSObject {
     private func parseEnoughPackets(reader: StreamAudioBufferReader) async throws -> ParseStatus {
         while !Task.isCancelled && pendingPacketCount <= pendingPacketsLimit {
             let data = try reader.read(exact: 20480)
-            guard let data else {
+            switch data {
+            case .eof:
+                logger.info("reach EOF.")
+                return .eof
+            case .retry:
                 logger.info("no enough data available now, sleep")
                 try await Task.sleep(for: .milliseconds(100))
                 // retry later
                 continue
+            case .data(let data):
+                try parseData(data: data)
             }
-            if data.isEmpty {
-                logger.error("reach EOF.")
-                return .eof
-            }
-            try parseData(data: data)
         }
         
         return .hasMoreData
@@ -211,7 +262,7 @@ public class StreamAudioPlayer : NSObject {
     }
 }
 
-extension StreamAudioPlayer: URLSessionDataDelegate, StreamPlayerDelegate {
+extension StreamAudioPlayer: StreamPlayerDelegate {
     
     public func onFillData(_ buffer: inout AudioQueueBuffer, packetDescriptions: inout [AudioStreamPacketDescription]) -> FillDataStatus {
         let packet = popLeftPendingPackets()
@@ -237,24 +288,4 @@ extension StreamAudioPlayer: URLSessionDataDelegate, StreamPlayerDelegate {
             return .eof
         }
     }
-    
-    public func urlSession(_ session: URLSession, task: URLSessionTask, didCompleteWithError error: Error?) {
-        logger.info("finished recved all data.")
-        try! buffer.close()
-        
-        if let error {
-            logger.error("complele error: \(error)")
-            return
-        }
-    }
-    
-    public func urlSession(_ session: URLSession, dataTask: URLSessionDataTask, didReceive data: Data) {
-        logger.info("recved data: \(data.count)")
-        do {
-            try buffer.write(contentsOf: data)
-        } catch {
-            logger.error("write data error: \(error)")
-        }
-    }
-    
 }

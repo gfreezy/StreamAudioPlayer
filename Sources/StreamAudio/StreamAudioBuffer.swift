@@ -44,6 +44,12 @@ public class StreamAudioBuffer {
 }
 
 
+public enum StreamAudioBufferReaderResult {
+    case eof
+    case data(Data)
+    case retry
+}
+
 public class StreamAudioBufferReader {
     private let streamAudio: StreamAudioBuffer
     private let fileHandle: FileHandle
@@ -53,45 +59,43 @@ public class StreamAudioBufferReader {
         self.fileHandle = try! FileHandle(forReadingFrom: streamAudio.path)
     }
     
-    // return emtpy when reach eof.
-    // return nil Data when there is no data available, should retry again.
-    public func read(upToCount size: Int) throws -> Data? {
+    public func read(upToCount size: Int) throws -> StreamAudioBufferReaderResult {
         let data = try fileHandle.read(upToCount: size)
         switch (data, streamAudio.isFinished) {
-        case (nil, true):
-            return Data()
-        case (let data?, true) where data.isEmpty:
-            return Data()
-        case (nil, false):
-            return nil
-        case (let data?, false) where data.isEmpty:
-            return nil
-        case (let data?, _):
-            return data
+        case (.none, true):
+            return .eof
+        case (.some(let data), true) where data.isEmpty:
+            return .eof
+        case (.some(let data), true):
+            return .data(data)
+        case (.none, false):
+            return .retry
+        case (.some(let data), false) where data.isEmpty:
+            return .retry
+        case (.some(let data), false):
+            return .data(data)
         }
     }
 
-    // return emtpy when reach eof.
-    // return nil Data when there is no data available, should retry again.
-    public func read(exact size: Int) throws -> Data? {
+    public func read(exact size: Int) throws -> StreamAudioBufferReaderResult {
         let offset = try fileHandle.offset()
         let data = try fileHandle.read(upToCount: size)
         switch (data, streamAudio.isFinished) {
         case (nil, true):
-            return Data()
+            return .eof
         case (let data?, true) where data.isEmpty:
-            return Data()
-        case (nil, false):
-            return nil
-        case (let data?, false) where data.isEmpty:
-            return nil
+            return .eof
         case (let data?, true):
-            return data
+            return .data(data)
+        case (nil, false):
+            return .retry
+        case (let data?, false) where data.isEmpty:
+            return .retry
         case (let data?, false) where data.count == size:
-            return data
+            return .data(data)
         case (_?, false):
             try fileHandle.seek(toOffset: offset)
-            return nil
+            return .retry
         }
     }
 }

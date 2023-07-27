@@ -15,7 +15,7 @@ fileprivate let logger = Logger(subsystem: "StreamAudio", category: "Mp3Download
 private let path = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first!.appendingPathComponent("a.mp3")
 
 struct ContentView: View {
-    @State var downloader: StreamAudioPlayer? = nil
+    @State var downloader: URLAudioPlayer? = nil
     
     init() {
         
@@ -31,7 +31,7 @@ struct ContentView: View {
                 Task {
                     do {
                         try self.downloader?.stop()
-                        let downloader = StreamAudioPlayer(URL(string: "https://freetestdata.com/wp-content/uploads/2021/09/Free_Test_Data_100KB_MP3.mp3")!,
+                        let downloader = URLAudioPlayer(URL(string: "https://freetestdata.com/wp-content/uploads/2021/09/Free_Test_Data_100KB_MP3.mp3")!,
                         cachePath: path)
                         try await downloader.play()
                         self.downloader = downloader
