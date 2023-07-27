@@ -188,7 +188,7 @@ public class StreamPlayer {
         }
         
         delegate?.onStop()
-        try dispose()
+        try dispose(immediate)
     }
     
     func dispose(_ immediate: Bool = true) throws {
