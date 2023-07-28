@@ -13,51 +13,6 @@ import Semaphore
 
 fileprivate let logger = Logger(subsystem: "StreamAudio", category: "StreamAudioPlayer")
 
-public class URLAudioPlayer: NSObject, URLSessionTaskDelegate, URLSessionDataDelegate {
-    private var urlSessionTask: URLSessionDataTask? = nil
-    private let url: URL
-    private let player: StreamAudioPlayer
-    
-    public init(_ url: URL, cachePath: URL, fileType: AudioFileTypeID = 0) {
-        self.url = url
-        player = StreamAudioPlayer(cachePath: cachePath)
-    }
-    
-    public func play() async throws {
-        guard urlSessionTask == nil else {
-            return
-        }
-        urlSessionTask = URLSession.shared.dataTask(with: url)
-        urlSessionTask?.delegate = self
-        urlSessionTask?.resume()
-        try await player.play()
-    }
-    
-    public func stop() throws {
-        try player.stop()
-    }
-    
-    public func urlSession(_ session: URLSession, task: URLSessionTask, didCompleteWithError error: Error?) {
-        logger.info("finished recved all data.")
-        try! player.finishData()
-        
-        if let error {
-            logger.error("complele error: \(error)")
-            return
-        }
-    }
-    
-    public func urlSession(_ session: URLSession, dataTask: URLSessionDataTask, didReceive data: Data) {
-        logger.info("recved data: \(data.count)")
-        do {
-            try player.writeData(data)
-        } catch {
-            logger.error("write data error: \(error)")
-        }
-    }
-}
-
-
 /// Initialized a new `StreamAudioPlayer` every time.
 public class StreamAudioPlayer : NSObject {
     private var parser: StreamParser? = nil
@@ -73,6 +28,7 @@ public class StreamAudioPlayer : NSObject {
     private let pendingPacketsLimit: Int
     private var finishedAllPacketsParsing = false
     private let audioEngineSetuped = OneShotChannel()
+    private let stoppedSignal = OneShotChannel()
 
     public init(cachePath: URL, fileType: AudioFileTypeID = 0, pendingPacketsLimit: Int = 50) {
         self.pendingPacketsLimit = pendingPacketsLimit
@@ -129,6 +85,10 @@ public class StreamAudioPlayer : NSObject {
     public func stop() throws {
         cancelBackgroundTask()
         try streamPlayer?.stop()
+    }
+    
+    public func waitForStop() async throws {
+        try await stoppedSignal.wait()
     }
     
     private func cancelBackgroundTask () {
@@ -232,6 +192,7 @@ public class StreamAudioPlayer : NSObject {
         
         let packets = try parser.parseBytes(data)
         logger.info("parsed packets: \(packets.count)")
+        self.totalPackets += packets.count
         
         guard parser.readyToProducePackets() else {
             logger.info("Not ready to produce packets, wait for next time.")
@@ -263,7 +224,6 @@ public class StreamAudioPlayer : NSObject {
 }
 
 extension StreamAudioPlayer: StreamPlayerDelegate {
-    
     public func onFillData(_ buffer: inout AudioQueueBuffer, packetDescriptions: inout [AudioStreamPacketDescription]) -> FillDataStatus {
         let packet = popLeftPendingPackets()
         
@@ -287,5 +247,9 @@ extension StreamAudioPlayer: StreamPlayerDelegate {
         case .eof:
             return .eof
         }
+    }
+    
+    public func onStopped() {
+        stoppedSignal.finish(())
     }
 }

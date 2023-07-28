@@ -30,12 +30,17 @@ struct ContentView: View {
             Button("Play") {
                 Task {
                     do {
-                        try self.downloader?.stop()
-                        let downloader = URLAudioPlayer(URL(string: "https://freetestdata.com/wp-content/uploads/2021/09/Free_Test_Data_100KB_MP3.mp3")!,
-                        cachePath: path)
+                        logger.info("start play")
+//                        try self.downloader?.stop()
+                        let downloader = URLAudioPlayer(URL(string: "https://freetestdata.com/wp-content/uploads/2021/09/Free_Test_Data_100KB_MP3.mp3")!)
                         try await downloader.play()
-                        self.downloader = downloader
-                    } catch let error as StreamAudioError {
+                        try await downloader.waitForStop()
+                        logger.info("wait for stop")
+                        
+                        let downloader2 = URLAudioPlayer(URL(string: "https://samples-files.com/samples/Audio/mp3/sample-file-4.mp3")!)
+                        try await downloader2.play()
+                        try await downloader2.waitForStop()
+                    } catch {
                         logger.error("download error: \(error, privacy: .public)")
                     }
                 }
