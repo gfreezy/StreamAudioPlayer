@@ -62,7 +62,7 @@ public class StreamPlayer {
     
     public init(asbd: AudioStreamBasicDescription) throws {
         self.asbd = asbd
-        var status = AudioQueueNewOutput(&self.asbd, handleOutputBuffer, Unmanaged.passUnretained(self).toOpaque(), nil, nil, 0, &audioQueue)
+        var status = AudioQueueNewOutput(&self.asbd, Self.handleOutputBuffer, Unmanaged.passUnretained(self).toOpaque(), nil, nil, 0, &audioQueue)
         guard status == noErr, let audioQueue else {
             logger.error("AudioQueueNewOutput error: \(status)")
             throw StreamAudioError(errorDescription: "AudioQueueNewOutput error: \(status)")
@@ -121,6 +121,10 @@ public class StreamPlayer {
         if runningState == .paused {
             try play()
         }
+    }
+    
+    public var isRunning: Bool {
+        runningState == .playing
     }
     
     public func play() throws {
@@ -237,29 +241,36 @@ public class StreamPlayer {
         }
     }
     
-    private let handleOutputBuffer: AudioQueueOutputCallback = { userData, queue, buffer in
+    private static let handleOutputBuffer: AudioQueueOutputCallback = { userData, queue, buffer in
         _ = handleOutputBufferCallback(userData, queue, buffer)
         return
+    }
+    
+    private static let isAudioQueueRunning = { (queue: AudioQueueRef) -> Bool? in
+        let propertyId = kAudioQueueProperty_IsRunning
+        var isRunning: UInt32 = 0
+        var dataSize = UInt32(MemoryLayout<UInt32>.size);
+        let status = AudioQueueGetProperty(queue, propertyId, &isRunning, &dataSize);
+        guard status == noErr else {
+            logger.error("AudioQueueGetProperty \(propertyId) error: \(status)")
+            return nil
+        }
+        
+        return isRunning == 1
     }
     
     private let propertyListener: AudioQueuePropertyListenerProc = { userData, queue, propertyId in
         let player = Unmanaged<StreamPlayer>.fromOpaque(userData!).takeUnretainedValue()
         
-        if (propertyId == kAudioQueueProperty_IsRunning) {
-            var isRunning: UInt32 = 0
-            var dataSize = UInt32(MemoryLayout<UInt32>.size);
-            let status = AudioQueueGetProperty(queue, propertyId, &isRunning, &dataSize);
-            guard status == noErr else {
-                logger.error("AudioQueueGetProperty \(propertyId) error: \(status)")
-                return
-            }
-            
-            if isRunning == 0 {
-                do {
-                    try player.stop(false)
-                } catch {
-                    logger.error("stop in propertyListener error: \(error)")
-                }
+        guard let isRunning = isAudioQueueRunning(queue) else {
+            return
+        }
+        
+        if !isRunning {
+            do {
+                try player.stop(false)
+            } catch {
+                logger.error("stop in propertyListener error: \(error)")
             }
         }
     }
