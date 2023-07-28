@@ -146,7 +146,7 @@ public class StreamAudioPlayer : NSObject {
         }
         
         logger.info("finish background task, total packets: \(self.totalPackets, privacy: .public), total pcm buffers: \(self.totalPcmBuffers, privacy: .public)")
-        dump(parser?.context)
+//        dump(parser?.context)
     }
     
     private enum ParseStatus {
