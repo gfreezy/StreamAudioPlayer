@@ -29,13 +29,17 @@ public class URLAudioPlayer: NSObject, URLSessionTaskDelegate, URLSessionDataDel
         player = StreamAudioPlayer(cachePath: p)
     }
     
-    public func play() async throws {
+    public func load() async throws {
         guard urlSessionTask == nil else {
             return
         }
         urlSessionTask = URLSession.shared.dataTask(with: url)
         urlSessionTask?.delegate = self
         urlSessionTask?.resume()
+    }
+    
+    public func play() async throws {
+        try await load()
         try await player.play()
     }
     
