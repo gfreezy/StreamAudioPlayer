@@ -16,19 +16,22 @@ fileprivate let logger = Logger(subsystem: "StreamAudio", category: "URLAudioPla
 
 public class URLAudioPlayer: NSObject, URLSessionTaskDelegate, URLSessionDataDelegate {
     private var urlSessionTask: URLSessionDataTask? = nil
-    private let url: URL
+    private var url: URL?
     private let player: StreamAudioPlayer
     
-    public init(_ url: URL, cachePath: URL? = nil, fileType: AudioFileTypeID = 0, bufferPacketsSize: Int = 50) {
+    public init(_ url: URL? = nil, cachePath: URL? = nil, fileType: AudioFileTypeID = 0, bufferPacketsSize: Int = 50) {
         self.url = url
         player = StreamAudioPlayer(cachePath: cachePath, fileType: fileType, bufferPacketsSize: bufferPacketsSize)
     }
     
-    public func load() {
+    public func load(_ url: URL? = nil) {
         guard urlSessionTask == nil else {
             return
         }
-        urlSessionTask = URLSession.shared.dataTask(with: url)
+        guard let u = self.url ?? url else {
+            fatalError("URL must be provided")
+        }
+        urlSessionTask = URLSession.shared.dataTask(with: u)
         urlSessionTask?.delegate = self
         urlSessionTask?.resume()
     }
