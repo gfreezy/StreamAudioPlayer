@@ -19,14 +19,9 @@ public class URLAudioPlayer: NSObject, URLSessionTaskDelegate, URLSessionDataDel
     private let url: URL
     private let player: StreamAudioPlayer
     
-    public init(_ url: URL, cachePath: URL? = nil, fileType: AudioFileTypeID = 0) {
+    public init(_ url: URL, cachePath: URL? = nil, fileType: AudioFileTypeID = 0, bufferPacketsSize: Int = 50) {
         self.url = url
-        let p = if let cachePath {
-            cachePath
-        } else {
-            URL(fileURLWithPath: NSTemporaryDirectory(), isDirectory: true).appending(path: UUID().uuidString)
-        }
-        player = StreamAudioPlayer(cachePath: p)
+        player = StreamAudioPlayer(cachePath: cachePath, fileType: fileType, bufferPacketsSize: bufferPacketsSize)
     }
     
     public func load() async throws {

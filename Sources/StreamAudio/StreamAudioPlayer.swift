@@ -30,9 +30,14 @@ public class StreamAudioPlayer : NSObject {
     private let audioEngineSetuped = OneShotChannel()
     private let stoppedSignal = OneShotChannel()
 
-    public init(cachePath: URL, fileType: AudioFileTypeID = 0, pendingPacketsLimit: Int = 50) {
+    public init(cachePath: URL? = nil, fileType: AudioFileTypeID = 0, bufferPacketsSize pendingPacketsLimit: Int = 50) {
         self.pendingPacketsLimit = pendingPacketsLimit
-        self.buffer = StreamAudioBuffer(path: cachePath)
+        let path = if let cachePath {
+            cachePath
+        } else {
+            URL(fileURLWithPath: NSTemporaryDirectory(), isDirectory: true).appending(path: UUID().uuidString)
+        }
+        self.buffer = StreamAudioBuffer(path: path)
         self.fileType = fileType
     }
     
