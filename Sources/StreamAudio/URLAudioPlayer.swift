@@ -24,7 +24,7 @@ public class URLAudioPlayer: NSObject, URLSessionTaskDelegate, URLSessionDataDel
         player = StreamAudioPlayer(cachePath: cachePath, fileType: fileType, bufferPacketsSize: bufferPacketsSize)
     }
     
-    public func load() async throws {
+    public func load() {
         guard urlSessionTask == nil else {
             return
         }
@@ -34,7 +34,7 @@ public class URLAudioPlayer: NSObject, URLSessionTaskDelegate, URLSessionDataDel
     }
     
     public func play() async throws {
-        try await load()
+        load()
         try await player.play()
     }
     
