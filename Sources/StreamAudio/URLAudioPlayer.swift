@@ -45,6 +45,10 @@ public class URLAudioPlayer: NSObject, URLSessionTaskDelegate, URLSessionDataDel
         try player.stop()
     }
     
+    public func cacheFilePath() -> URL {
+        return player.cacheFilePath()
+    }
+    
     public func waitForStop() async throws {
         try await player.waitForStop()
     }

@@ -21,10 +21,15 @@ public class StreamAudioBuffer {
             throw StreamAudioError(errorDescription: "File is finished.")
         }
         try fileHandle.write(contentsOf: contentsOf)
+        try fileHandle.synchronize()
     }
     
     public func newReader() -> StreamAudioBufferReader {
         StreamAudioBufferReader(streamAudio: self)
+    }
+    
+    public func cacheFilePath() -> URL {
+        return path
     }
     
     public func finish() {

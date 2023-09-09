@@ -117,6 +117,10 @@ public class StreamAudioPlayer : NSObject {
         }
     }
     
+    public func cacheFilePath() -> URL {
+        return buffer.cacheFilePath()
+    }
+    
     public func writeData(_ data: Data) throws {
         do {
             try buffer.write(contentsOf: data)
