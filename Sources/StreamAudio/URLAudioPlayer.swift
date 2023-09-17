@@ -18,6 +18,7 @@ public class URLAudioPlayer: NSObject, URLSessionTaskDelegate, URLSessionDataDel
     private var urlSessionTask: URLSessionDataTask? = nil
     private var url: URL?
     private let player: StreamAudioPlayer
+    private let loadFinished = OneShotChannel()
     
     public init(_ url: URL? = nil, cachePath: URL? = nil, fileType: AudioFileTypeID = 0, bufferPacketsSize: Int = 50) {
         self.url = url
@@ -49,6 +50,10 @@ public class URLAudioPlayer: NSObject, URLSessionTaskDelegate, URLSessionDataDel
         return player.cacheFilePath()
     }
     
+    public func waitForLoadFinished() async throws {
+        try await loadFinished.wait()
+    }
+    
     public func waitForStop() async throws {
         try await player.waitForStop()
     }
@@ -59,7 +64,9 @@ public class URLAudioPlayer: NSObject, URLSessionTaskDelegate, URLSessionDataDel
         
         if let error {
             logger.error("complele error: \(error)")
-            return
+            loadFinished.finish(throwing: error)
+        } else {
+            loadFinished.finish(())
         }
     }
     
