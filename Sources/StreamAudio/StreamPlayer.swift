@@ -45,7 +45,7 @@ public class StreamPlayer {
     private var audioQueue: AudioQueueRef? = nil
     private var _runningState: RunningState = .created
     private var runningStateLock: NSLock = NSLock()
-    private(set) var runningState: RunningState {
+    public private(set) var runningState: RunningState {
         set(value) {
             runningStateLock.withLock {
                 _runningState = value
