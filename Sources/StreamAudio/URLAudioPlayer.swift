@@ -20,6 +20,10 @@ public class URLAudioPlayer: NSObject, URLSessionTaskDelegate, URLSessionDataDel
     private let player: StreamAudioPlayer
     private let loadFinished = OneShotChannel()
     
+    public var runningState: RunningState {
+        player.runningState
+    }
+    
     public init(_ url: URL? = nil, cachePath: URL? = nil, fileType: AudioFileTypeID = 0, bufferPacketsSize: Int = 50) {
         self.url = url
         player = StreamAudioPlayer(cachePath: cachePath, fileType: fileType, bufferPacketsSize: bufferPacketsSize)

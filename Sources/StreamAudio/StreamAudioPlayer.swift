@@ -80,6 +80,10 @@ public class StreamAudioPlayer : NSObject {
         }
     }
     
+    public var runningState: RunningState {
+        streamPlayer?.runningState ?? .disposed
+    }
+    
     public func play() async throws {
         try starBackgroundParsingAndDecoding()
         try await audioEngineSetuped.wait()
