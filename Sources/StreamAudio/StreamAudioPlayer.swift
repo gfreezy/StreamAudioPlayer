@@ -35,7 +35,7 @@ public class StreamAudioPlayer : NSObject {
         let path = if let cachePath {
             cachePath
         } else {
-            URL(fileURLWithPath: NSTemporaryDirectory(), isDirectory: true).appending(path: UUID().uuidString)
+            FileManager.default.temporaryDirectory.appending(path: UUID().uuidString)
         }
         self.buffer = StreamAudioBuffer(path: path)
         self.fileType = fileType

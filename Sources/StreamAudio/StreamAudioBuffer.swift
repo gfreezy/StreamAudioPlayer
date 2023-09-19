@@ -42,9 +42,8 @@ public class StreamAudioBuffer {
     }
     
     deinit {
-        do {
-            try close()
-        } catch {}
+        try? close()
+        try? FileManager.default.removeItem(at: path)
     }
 }
 
