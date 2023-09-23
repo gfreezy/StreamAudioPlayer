@@ -66,6 +66,10 @@ public class StreamAudioPlayer : NSObject {
         pendingLock.withLock {
             finishedAllPacketsParsing = true
         }
+        do {
+            try streamPlayer?.notifyNewData()
+            logger.info("notify finished parsing all packets")
+        } catch {}
     }
     
     private func pushPendingPackets(contentsOf packets: [StreamPacket]) {
