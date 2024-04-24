@@ -164,6 +164,7 @@ public class StreamAudioPlayer : NSObject {
         
         // if no packets available, stop here. Cause player skips starting.
         if self.totalPackets == 0 {
+            audioEngineSetuped.finish(())
             stoppedSignal.finish(())
         }
         logger.info("finish background task, total packets: \(self.totalPackets, privacy: .public), total pcm buffers: \(self.totalPcmBuffers, privacy: .public)")
