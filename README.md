@@ -44,3 +44,6 @@ try player.stop()
 // player will stop when all data is finished or user called `stop()` func.
 try await play.waitForStop()
 ```
+
+# License
+MIT
