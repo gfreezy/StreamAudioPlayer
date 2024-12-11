@@ -13,7 +13,7 @@ let package = Package(
             targets: ["StreamAudio"]),
     ],
     dependencies: [
-        .package(name: "Semaphore", url: "https://github.com/groue/Semaphore", from: "0.1.0")
+        .package(url: "https://github.com/groue/Semaphore", from: "0.1.0")
     ],
     targets: [
         // Targets are the basic building blocks of a package, defining a module or a test suite.
