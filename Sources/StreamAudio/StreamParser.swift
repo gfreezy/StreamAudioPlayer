@@ -111,9 +111,8 @@ fileprivate func propertyListenerProc(
     
     // Convert inPropertyID to string
     let propertyIDString = withUnsafeBytes(of: inPropertyID.bigEndian) {
-        var a = Array($0)
-        a.append(0)
-        return String(cString: a)
+        let a = Array($0)
+        return String(decoding: a, as: UTF8.self)
     }
     
     // Process based on the property ID

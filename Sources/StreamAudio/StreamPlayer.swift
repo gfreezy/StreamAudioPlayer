@@ -41,7 +41,7 @@ public enum RunningState: String {
     case disposed
 }
 
-public class StreamPlayer {
+public final class StreamPlayer: @unchecked Sendable {
     private var audioQueue: AudioQueueRef? = nil
     private var _runningState: RunningState = .created
     private var runningStateLock: NSLock = NSLock()
@@ -51,7 +51,7 @@ public class StreamPlayer {
                 _runningState = value
             }
         }
-        
+
         get {
             runningStateLock.withLock {
                 _runningState
@@ -59,7 +59,12 @@ public class StreamPlayer {
         }
     }
     private var asbd: AudioStreamBasicDescription
-    public weak var delegate: StreamPlayerDelegate?
+    private let delegateLock = NSLock()
+    private weak var _delegate: StreamPlayerDelegate?
+    public weak var delegate: StreamPlayerDelegate? {
+        get { delegateLock.withLock { _delegate } }
+        set { delegateLock.withLock { _delegate = newValue } }
+    }
     private var pendingBuffersLock = NSLock()
     private var pendingBuffers: [AudioQueueBufferRef] = []
     
@@ -219,12 +224,14 @@ public class StreamPlayer {
     
     private static func handleOutputBufferCallback(_ userData: UnsafeMutableRawPointer?, _ queue: AudioQueueRef, _ buffer: AudioQueueBufferRef) -> Bool {
         let player = Unmanaged<StreamPlayer>.fromOpaque(userData!).takeUnretainedValue()
-        if player.runningState == .stopping {
+        let state = player.runningState
+        if state == .stopping {
             return false
         }
-        
-        guard player.runningState == .playing || player.runningState == .created, let delegate = player.delegate else {
-            logger.error("runningState is \(player.runningState.rawValue, privacy: .public), delegate is \(player.delegate != nil, privacy: .public), exit handleOutputBuffer")
+
+        let delegateSnapshot = player.delegate
+        guard state == .playing || state == .created, let delegate = delegateSnapshot else {
+            logger.error("runningState is \(state.rawValue, privacy: .public), delegate is \(delegateSnapshot != nil, privacy: .public), exit handleOutputBuffer")
             return false
         }
         var packetDescriptions: [AudioStreamPacketDescription] = []
@@ -256,7 +263,7 @@ public class StreamPlayer {
         return
     }
     
-    private static let isAudioQueueRunning = { (queue: AudioQueueRef) -> Bool? in
+    private static func isAudioQueueRunning(_ queue: AudioQueueRef) -> Bool? {
         let propertyId = kAudioQueueProperty_IsRunning
         var isRunning: UInt32 = 0
         var dataSize = UInt32(MemoryLayout<UInt32>.size);
@@ -265,7 +272,7 @@ public class StreamPlayer {
             logger.error("AudioQueueGetProperty \(propertyId) error: \(status)")
             return nil
         }
-        
+
         return isRunning == 1
     }
     

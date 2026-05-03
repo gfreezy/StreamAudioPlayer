@@ -6,10 +6,15 @@
 //
 
 import Foundation
-import AVFoundation
+@preconcurrency import AVFoundation
 import OSLog
 
 fileprivate let logger = Logger(subsystem: "StreamAudio", category: "StreamDecoder")
+
+private final class FlagBox: @unchecked Sendable {
+    var value: Bool
+    init(_ value: Bool) { self.value = value }
+}
 
 public class StreamDecoder {
     private let audioConverter: AVAudioConverter?
@@ -82,14 +87,14 @@ public class StreamDecoder {
         let pcmBuffer = AVAudioPCMBuffer(pcmFormat: pcmFormat, frameCapacity: AVAudioFrameCount(buffer.byteLength))!
         pcmBuffer.frameLength = 0
 
-        var processed = false
+        let processed = FlagBox(false)
         // 进行转换
         let inputBlock: AVAudioConverterInputBlock = { inNumPackets, outStatus in
 //            logger.info("AVAudioConverterInputBlock: \(inNumPackets)")
-            if !processed {
+            if !processed.value {
                 outStatus.pointee = AVAudioConverterInputStatus.haveData
                 assert(inNumPackets >= buffer.packetCount)
-                processed = true
+                processed.value = true
                 return buffer
             } else {
                 outStatus.pointee = AVAudioConverterInputStatus.noDataNow

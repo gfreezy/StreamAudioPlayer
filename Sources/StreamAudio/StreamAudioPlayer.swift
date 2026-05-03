@@ -14,17 +14,29 @@ import Semaphore
 fileprivate let logger = Logger(subsystem: "StreamAudio", category: "StreamAudioPlayer")
 
 /// Initialized a new `StreamAudioPlayer` every time.
-public class StreamAudioPlayer : NSObject {
-    private var parser: StreamParser? = nil
+public final class StreamAudioPlayer: NSObject, @unchecked Sendable {
+    private var _parser: StreamParser? = nil
+    private var parser: StreamParser? {
+        get { pendingLock.withLock { _parser } }
+        set { pendingLock.withLock { _parser = newValue } }
+    }
     private let buffer: StreamAudioBuffer
     private let fileType: AudioFileTypeID
     private var totalPackets = 0
     private var totalPcmBuffers = 0
-    private var backgroundTask: Task<(), Never>?
-    private var streamPlayer: StreamPlayer? = nil
+    private var _backgroundTask: Task<(), Never>?
+    private var backgroundTask: Task<(), Never>? {
+        get { pendingLock.withLock { _backgroundTask } }
+        set { pendingLock.withLock { _backgroundTask = newValue } }
+    }
+    private var _streamPlayer: StreamPlayer? = nil
+    private var streamPlayer: StreamPlayer? {
+        get { pendingLock.withLock { _streamPlayer } }
+        set { pendingLock.withLock { _streamPlayer = newValue } }
+    }
     private var pendingPackets: [StreamPacket] = []
-    private var pendingLock: NSLock = NSLock()
-    private var pendingPacketsSemaphore = AsyncSemaphore(value: 1)
+    private let pendingLock: NSLock = NSLock()
+    private let pendingPacketsSemaphore = AsyncSemaphore(value: 1)
     private let pendingPacketsLimit: Int
     private var finishedAllPacketsParsing = false
     private let audioEngineSetuped = OneShotChannel()
