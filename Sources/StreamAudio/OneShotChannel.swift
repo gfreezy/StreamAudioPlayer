@@ -21,7 +21,7 @@
 
 import Foundation
 
-public final class OneShotChannel<T>: @unchecked Sendable {
+public final class OneShotChannel<T: Sendable>: @unchecked Sendable {
     // MARK: - Internal State
 
     private enum Value {
@@ -30,59 +30,41 @@ public final class OneShotChannel<T>: @unchecked Sendable {
         case error(Error)
     }
 
-    /// The semaphore value.
+    /// Final value or pending.
     private var value: Value
 
-    /// As many elements as there are suspended tasks waiting for a signal.
-    /// We store `Suspension` instances instead of `UnsafeContinuation`, because
-    /// we support cancellation by removing `Suspension` instances from
-    /// this array.
-    private var continuation: CheckedContinuation<Void, Never>? = nil
+    /// Suspended waiters, keyed by id so a single waiter can be removed
+    /// by `onCancel` without disturbing the others. Continuations are
+    /// throwing so we can resume them with `CancellationError` directly.
+    private var continuations: [UUID: CheckedContinuation<T, Error>] = [:]
 
-    /// The lock that protects `value` and `continuation`.
     private let _lock = NSRecursiveLock()
 
-    // MARK: - Creating a Semaphore
+    // MARK: - Creating a Channel
 
-    /// Creates a semaphore.
-    ///
-    /// - parameter value: The starting value for the semaphore. Do not pass a
-    ///   value less than zero.
     public init(_ type: T.Type) {
         self.value = .pending
     }
 
     deinit {
         precondition(
-            continuation == nil,
+            continuations.isEmpty,
             "OneShotChannel is deallocated while task is suspended waiting for a signal.")
     }
 
     // MARK: - Locking
     //
     // Swift concurrency is... unfinished. We really need to protect our inner
-    // state (`value` and `suspension`) across the calls to
-    // `withUnsafeContinuation`. Unfortunately, this method introduces a
-    // suspension point. So we need a lock. But the Swift compiler is never out
-    // of funny jokes:
-    //
-    // > Instance method 'lock' is unavailable from asynchronous contexts;
-    // > Use async-safe scoped locking instead; this is an error in Swift 6
-    //
-    // This is very immature, because we don't quite have any other solution.
-    // Maybe the authors of Swift concurrency will find it interesting
-    // eventually to provide 1. building blocks that 2. solve known problems
-    // and 3. back deploy. So far they're busy polishing something else.
-    //
-    // So let's just hide the lock and mute this stupid warning:
+    // state across the calls to `withCheckedThrowingContinuation`. Unfortunately,
+    // that method introduces a suspension point, so we need a lock. The compiler
+    // complains about lock() in async contexts, so the helpers below mute the
+    // warning by hiding the lock behind regular methods.
     func lock() { _lock.lock() }
     func unlock() { _lock.unlock() }
 
     var isFinished: Bool {
         lock()
-        defer {
-            unlock()
-        }
+        defer { unlock() }
         if case .pending = value {
             return false
         } else {
@@ -90,82 +72,82 @@ public final class OneShotChannel<T>: @unchecked Sendable {
         }
     }
 
-    // MARK: - Waiting for the Semaphore
+    // MARK: - Waiting
 
-    /// Waits for, or decrements, a semaphore.
+    /// Suspend until `finish(_:)` or `finish(throwing:)` resolves the channel.
     ///
-    /// Decrement the counting semaphore. If the resulting value is less than
-    /// zero, this function suspends the current task until a signal occurs,
-    /// without blocking the underlying thread. Otherwise, no suspension happens.
+    /// **Cancellation**: if the calling Task is cancelled while suspended,
+    /// this throws `CancellationError` immediately — the continuation is
+    /// removed from the waiter set and resumed. This makes the channel
+    /// composable with structured concurrency.
     public func wait() async throws -> T {
-        lock()
-        defer {
+        let id = UUID()
+        return try await withTaskCancellationHandler {
+            try await withCheckedThrowingContinuation { (cont: CheckedContinuation<T, Error>) in
+                lock()
+                // If cancellation arrived before we registered (e.g. parent
+                // Task was already cancelled when wait() was entered), the
+                // onCancel handler may have fired and found nothing to resume.
+                // Detect this race here and bail out.
+                if Task.isCancelled {
+                    unlock()
+                    cont.resume(throwing: CancellationError())
+                    return
+                }
+                switch value {
+                case .success(let v):
+                    unlock()
+                    cont.resume(returning: v)
+                case .error(let e):
+                    unlock()
+                    cont.resume(throwing: e)
+                case .pending:
+                    continuations[id] = cont
+                    unlock()
+                }
+            }
+        } onCancel: {
+            lock()
+            let cont = continuations.removeValue(forKey: id)
             unlock()
-        }
-        switch value {
-        case .pending:
-            break
-        case .error(let error):
-            throw error
-        case .success(let val):
-            return val
-        }
-
-        await withCheckedContinuation { continuation in
-            // Register the continuation that `signal` will resume.
-            //
-            // The first suspended task will be the first task resumed by `signal`.
-            // This is not intended to be a strong fifo guarantee, but just
-            // an attempt at some fairness.
-            self.continuation = continuation
-            unlock()
-        }
-        lock()
-        switch value {
-        case .pending:
-            fatalError("value in pending state")
-        case .error(let error):
-            throw error
-        case .success(let val):
-            return val
+            cont?.resume(throwing: CancellationError())
         }
     }
 
-    // MARK: - Signaling the Semaphore
+    // MARK: - Signaling
 
-    /// Signals (increments) a semaphore.
-    ///
-    /// Increment the counting semaphore. If the previous value was less than
-    /// zero, this function resumes a task currently suspended in ``wait()``.
-    ///
-    /// - returns This function returns true if a suspended task is resumed.
-    ///   Otherwise, false is returned.
+    /// Resolve the channel with a value. All current and future waiters
+    /// receive `value`. Subsequent `finish` calls are ignored.
     public func finish(_ value: T) {
         lock()
-        defer { unlock() }
-
-        self.value = .success(value)
-
-        guard let continuation else {
-            // finished before waitting
+        guard case .pending = self.value else {
+            unlock()
             return
         }
-        continuation.resume()
-        self.continuation = nil
+        self.value = .success(value)
+        let pending = continuations
+        continuations.removeAll()
+        unlock()
+        for (_, cont) in pending {
+            cont.resume(returning: value)
+        }
     }
 
-    public func finish(throwing: Error) {
+    /// Resolve the channel with an error. All current and future waiters
+    /// see the error thrown. Subsequent `finish` calls are ignored.
+    public func finish(throwing error: Error) {
         lock()
-        defer { unlock() }
-
-        self.value = .error(throwing)
-
-        guard let continuation else {
-            // finished before waitting
+        guard case .pending = self.value else {
+            unlock()
             return
         }
-        continuation.resume()
-        self.continuation = nil
+        self.value = .error(error)
+        let pending = continuations
+        continuations.removeAll()
+        unlock()
+        for (_, cont) in pending {
+            cont.resume(throwing: error)
+        }
     }
 }
 
