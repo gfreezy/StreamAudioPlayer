@@ -31,6 +31,7 @@ public class StreamParserContext {
     public var maximumPacketSize: UInt32? = nil
     public var dataOffset: Int64? = nil
     public var channelLayout: AudioChannelLayout? = nil
+    public var channelLayoutData: Data? = nil
     public var magicCookieData: Data? = nil
     public var bitRate: UInt32? = nil
     public var packetTableInfo: AudioFilePacketTableInfo? = nil
@@ -44,7 +45,19 @@ public class StreamParserContext {
         guard var dataFormat else {
             return nil
         }
-        let layout: AVAudioChannelLayout? = if var channelLayout {
+        let layout: AVAudioChannelLayout? = if let channelLayoutData {
+            channelLayoutData.withUnsafeBytes { rawBuffer -> AVAudioChannelLayout? in
+                guard let baseAddress = rawBuffer.baseAddress else {
+                    return nil
+                }
+
+                let layoutPointer = UnsafeMutableRawPointer.allocate(byteCount: rawBuffer.count, alignment: MemoryLayout<AudioChannelLayout>.alignment)
+                defer { layoutPointer.deallocate() }
+
+                layoutPointer.copyMemory(from: baseAddress, byteCount: rawBuffer.count)
+                return AVAudioChannelLayout(layout: layoutPointer.assumingMemoryBound(to: AudioChannelLayout.self))
+            }
+        } else if var channelLayout {
             AVAudioChannelLayout(layout: &channelLayout)
         } else {
             nil
@@ -225,18 +238,19 @@ fileprivate func propertyListenerProc(
             break
         }
         
-        let channelLayoutData = UnsafeMutableRawPointer.allocate(byteCount: Int(size), alignment: MemoryLayout<UInt8>.alignment)
+        let channelLayoutData = UnsafeMutableRawPointer.allocate(byteCount: Int(size), alignment: MemoryLayout<AudioChannelLayout>.alignment)
         defer { channelLayoutData.deallocate() }
         status = AudioFileStreamGetProperty(inAudioFileStream, inPropertyID, &size, channelLayoutData)
         if status == noErr {
             let channelLayout = channelLayoutData.bindMemory(to: AudioChannelLayout.self, capacity: 1).pointee
             context.channelLayout = channelLayout
+            context.channelLayoutData = Data(bytes: channelLayoutData, count: Int(size))
         } else {
             logger.error("AudioFileStreamGetProperty \(propertyIDString, privacy: .public) error: \(status)")
         }
     case kAudioFileStreamProperty_BitRate:
         var bitRate: UInt32 = 0
-        var size: UInt32 = UInt32(MemoryLayout<UInt32>.alignment)
+        var size: UInt32 = UInt32(MemoryLayout<UInt32>.size)
         let status = AudioFileStreamGetProperty(inAudioFileStream, inPropertyID, &size, &bitRate)
         if status == noErr {
             context.bitRate = bitRate
@@ -268,13 +282,13 @@ fileprivate func propertyListenerProc(
 
 public class StreamParser {
     private let contextPointer: UnsafeMutablePointer<StreamParserContext> = {
-        let p = UnsafeMutablePointer<StreamParserContext>.allocate(capacity: MemoryLayout.size(ofValue: StreamParserContext.self))
+        let p = UnsafeMutablePointer<StreamParserContext>.allocate(capacity: 1)
         p.initialize(to: StreamParserContext())
         return p
     }()
     
     private let audioFileStream: UnsafeMutablePointer<AudioFileStreamID?> = {
-        let p = UnsafeMutablePointer<AudioFileID?>.allocate(capacity: MemoryLayout.size(ofValue: AudioFileStreamID.self))
+        let p = UnsafeMutablePointer<AudioFileStreamID?>.allocate(capacity: 1)
         p.initialize(to: nil)
         return p
     }()
