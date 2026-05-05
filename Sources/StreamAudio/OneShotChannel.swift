@@ -21,7 +21,7 @@
 
 import Foundation
 
-public final class OneShotChannel<T: Sendable>: @unchecked Sendable {
+final class OneShotChannel<T: Sendable>: @unchecked Sendable {
     // MARK: - Internal State
 
     private enum Value {
