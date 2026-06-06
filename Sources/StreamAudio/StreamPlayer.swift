@@ -1,6 +1,6 @@
 //
 //  File.swift
-//  
+//
 //
 //  Created by feichao on 2023/7/10.
 //
@@ -107,7 +107,7 @@ public final class StreamPlayer: @unchecked Sendable {
     private var callbackContext: StreamPlayerCallbackContext?
     private var callbackUserData: UnsafeMutableRawPointer?
     private var isRunningPropertyListenerRegistered = false
-    
+
     public init(asbd: AudioStreamBasicDescription) throws {
         self.asbd = asbd
 
@@ -175,25 +175,25 @@ public final class StreamPlayer: @unchecked Sendable {
         callbackUserData = nil
         callbackContext = nil
     }
-    
+
     private func pushPendingAudioQueueBuffer(_ buffer: AudioQueueBufferRef) {
         pendingBuffersLock.withLock {
             pendingBuffers.append(buffer)
         }
     }
-    
+
     private func popPendingAudioQueueBuffer() -> AudioQueueBufferRef? {
         pendingBuffersLock.withLock {
             pendingBuffers.popLast()
         }
     }
-    
+
     private func countPendingAudioQueueBuffer() -> Int {
         pendingBuffersLock.withLock {
             pendingBuffers.count
         }
     }
-    
+
     private func enqueuePendingBuffers() throws {
         guard let audioQueue, let callbackUserData else {
             return
@@ -210,39 +210,59 @@ public final class StreamPlayer: @unchecked Sendable {
             try play()
         }
     }
-    
+
     public var isRunning: Bool {
         runningState == .playing
     }
-    
+
     public func play() throws {
         guard let queue = audioQueue else {
             logger.error("audioQueue empty")
             throw StreamAudioError(errorDescription: "audioQueue empty")
         }
 
-        switch runningState {
+        let previousState = runningState
+        switch previousState {
         case .created, .paused:
-            try enqueuePendingBuffers()
+            break
         case .playing:
             throw StreamAudioError(errorDescription: "AudioQueue is playing")
         case .stopping, .stopped, .disposed:
             logger.error("AudioQueue is stopped or disposed")
             throw StreamAudioError(errorDescription: "AudioQueue is stopped or disposed")
         }
-        
+
         logger.info("start audio queue")
+        // Mark playing BEFORE refilling: the refill goes through the same
+        // callback path as the AudioQueue, whose state guard rejects buffers
+        // while paused. With the old order (refill first, then set playing)
+        // every idle buffer bounced back to the pending list; if the queue had
+        // also drained all in-flight buffers during the pause, it restarted
+        // with nothing enqueued and never fired a callback again — permanently
+        // starving the parser and hanging waitForStop().
         runningState = .playing
-        
+        do {
+            try enqueuePendingBuffers()
+        } catch {
+            runningState = previousState
+            throw error
+        }
+
+        // The refill can hit EOF and stop the player synchronously.
+        guard runningState == .playing else {
+            return
+        }
+
         let status = AudioQueueStart(queue, nil)
         guard status == noErr else {
             logger.error("AudioQueueStart error: \(status)")
+            runningState = previousState
             throw StreamAudioError(errorDescription: "AudioQueueStart error: \(status)")
         }
-        
+
         delegate?.onStarted()
     }
-    
+
     public func pause() throws {
         logger.info("pause")
         guard runningState == .playing else {
@@ -260,7 +280,7 @@ public final class StreamPlayer: @unchecked Sendable {
         }
         delegate?.onPaused()
     }
-    
+
     public func stop(_ immediate: Bool = true) throws {
         if runningState == .stopping || runningState == .stopped || runningState == .disposed {
             return
@@ -278,14 +298,14 @@ public final class StreamPlayer: @unchecked Sendable {
             logger.error("AudioQueueStop error: \(status)")
             throw StreamAudioError(errorDescription: "AudioQueueStop error: \(status)")
         }
-        
+
         delegate?.onStopping()
         if immediate {
             runningState = .stopped
             delegate?.onStopped()
         }
     }
-    
+
     public func dispose(_ immediate: Bool = true) throws {
         guard runningState != .disposed else {
             logger.error("AudioQueue is disposed")
@@ -323,7 +343,7 @@ public final class StreamPlayer: @unchecked Sendable {
         }
         return Unmanaged<StreamPlayerCallbackContext>.fromOpaque(userData).takeUnretainedValue()
     }
-    
+
     private static func handleOutputBufferCallback(_ userData: UnsafeMutableRawPointer?, _ queue: AudioQueueRef, _ buffer: AudioQueueBufferRef) -> Bool {
         guard let context = callbackContext(from: userData), let player = context.beginCallback() else {
             return false
@@ -372,12 +392,12 @@ public final class StreamPlayer: @unchecked Sendable {
             return true
         }
     }
-    
+
     private static let handleOutputBuffer: AudioQueueOutputCallback = { userData, queue, buffer in
         _ = handleOutputBufferCallback(userData, queue, buffer)
         return
     }
-    
+
     private static func isAudioQueueRunning(_ queue: AudioQueueRef) -> Bool? {
         let propertyId = kAudioQueueProperty_IsRunning
         var isRunning: UInt32 = 0
@@ -390,22 +410,22 @@ public final class StreamPlayer: @unchecked Sendable {
 
         return isRunning == 1
     }
-    
+
     private static let propertyListener: AudioQueuePropertyListenerProc = { userData, queue, propertyId in
         guard let context = callbackContext(from: userData), let player = context.beginCallback() else {
             return
         }
         defer { context.endCallback() }
-        
+
         guard let isRunning = isAudioQueueRunning(queue) else {
             return
         }
-        
+
         if !isRunning {
             player.delegate?.onStopped()
         }
     }
-    
+
     deinit {
         if runningState != .disposed {
             do {
