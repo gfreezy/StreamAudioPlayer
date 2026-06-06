@@ -15,13 +15,19 @@ fileprivate let logger = Logger(subsystem: "StreamAudio", category: "StreamAudio
 
 /// Initialized a new `StreamAudioPlayer` every time.
 public final class StreamAudioPlayer: NSObject, @unchecked Sendable {
-    private var _parser: StreamParser? = nil
-    private var parser: StreamParser? {
+    private var _parser: (any StreamPacketProducer)? = nil
+    private var parser: (any StreamPacketProducer)? {
         get { pendingLock.withLock { _parser } }
         set { pendingLock.withLock { _parser = newValue } }
     }
     private let buffer: StreamAudioBuffer
     private let fileType: AudioFileTypeID
+    /// Non-nil when playing a headerless linear PCM stream. Bypasses
+    /// AudioFileStream parsing entirely — see `RawPCMParser`.
+    private let rawPCMFormat: AudioStreamBasicDescription?
+    /// How many buffered bytes to accumulate before producing packets.
+    /// Lower values reduce playback start latency for realtime streams.
+    private let readChunkBytes: Int
     private var totalPackets = 0
     private var totalPcmBuffers = 0
     private var _backgroundTask: Task<(), Never>?
@@ -51,6 +57,33 @@ public final class StreamAudioPlayer: NSObject, @unchecked Sendable {
         }
         self.buffer = StreamAudioBuffer(path: path)
         self.fileType = fileType
+        self.rawPCMFormat = nil
+        self.readChunkBytes = 20480
+    }
+
+    /// Create a player for a headerless linear PCM stream, e.g. the raw
+    /// 24kHz PCM16 audio emitted by realtime speech APIs. Data written via
+    /// `writeData` is played as-is without container parsing.
+    /// - Parameters:
+    ///   - rawPCM: stream description of the incoming PCM bytes.
+    ///   - readChunkBytes: bytes to accumulate before producing packets.
+    ///     The default 4800 equals 100ms of 24kHz mono PCM16.
+    public init(
+        rawPCM asbd: AudioStreamBasicDescription,
+        cachePath: URL? = nil,
+        bufferPacketsSize pendingPacketsLimit: Int = 50,
+        readChunkBytes: Int = 4800
+    ) {
+        self.pendingPacketsLimit = pendingPacketsLimit
+        let path = if let cachePath {
+            cachePath
+        } else {
+            FileManager.default.temporaryDirectory.appending(path: UUID().uuidString)
+        }
+        self.buffer = StreamAudioBuffer(path: path)
+        self.fileType = 0
+        self.rawPCMFormat = asbd
+        self.readChunkBytes = readChunkBytes
     }
     
     private enum PendingPacket {
@@ -124,7 +157,11 @@ public final class StreamAudioPlayer: NSObject, @unchecked Sendable {
     }
 
     public func starBackgroundParsingAndDecoding() throws {
-        parser = try StreamParser.create(fileType: fileType)
+        parser = if let rawPCMFormat {
+            try RawPCMParser(asbd: rawPCMFormat)
+        } else {
+            try StreamParser.create(fileType: fileType)
+        }
         backgroundTask = Task.detached { [weak self] in
             guard let self else {
                 return
@@ -190,7 +227,7 @@ public final class StreamAudioPlayer: NSObject, @unchecked Sendable {
     
     private func parseEnoughPackets(reader: StreamAudioBufferReader) async throws -> ParseStatus {
         while !Task.isCancelled && pendingPacketCount <= pendingPacketsLimit {
-            let data = try reader.read(exact: 20480)
+            let data = try reader.read(exact: readChunkBytes)
             switch data {
             case .eof:
                 logger.info("reach EOF.")

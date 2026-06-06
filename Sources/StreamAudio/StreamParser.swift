@@ -377,3 +377,16 @@ public class StreamParser {
         logger.info("StreamParser deinit")
     }
 }
+
+/// Produces playable `StreamPacket`s from a byte stream.
+///
+/// `StreamParser` implements this for containerized/encoded formats
+/// (mp3, ADTS, wav, ...) via AudioFileStream. `RawPCMParser` implements it
+/// for headerless linear PCM where no parsing is possible or needed.
+public protocol StreamPacketProducer: AnyObject {
+    func parseBytes(_ data: Data) throws -> [StreamPacket]
+    func readyToProducePackets() -> Bool
+    func audioFormat() -> AVAudioFormat?
+}
+
+extension StreamParser: StreamPacketProducer {}
